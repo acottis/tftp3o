@@ -89,6 +89,8 @@ impl TftpOption {
 #[repr(u8)]
 enum OpCode {
     ReadRequest = 1,
+    Data = 3,
+    Acknowledgement = 4,
     ErrorCode = 5,
     OptionAcknowledgement = 6,
 }
@@ -99,6 +101,8 @@ impl TryFrom<u8> for OpCode {
     fn try_from(value: u8) -> Result<Self, Self::Error> {
         match value {
             1 => Ok(Self::ReadRequest),
+            3 => Ok(Self::Data),
+            4 => Ok(Self::Acknowledgement),
             5 => Ok(Self::ErrorCode),
             6 => Ok(Self::OptionAcknowledgement),
             value => Err(Error::InvalidTftpOpCode(value)),
@@ -108,30 +112,86 @@ impl TryFrom<u8> for OpCode {
 
 impl Serialise for OpCode {
     fn serialise(&self) -> Vec<u8> {
-        let mut bytes = [0,0];
+        let mut bytes = [0, 0];
         bytes[1] = *self as u8;
         bytes.to_vec()
     }
 }
 
 #[derive(Debug)]
-pub struct Tftp<'tftp> {
-    op_code: OpCode,
-    filename: Option<&'tftp CStr>,
-    mode: Option<&'tftp CStr>,
+pub enum Tftp<'tftp> {
+    ReadRequest(ReadRequest<'tftp>),
+    Acknowledgement(Acknowledgement),
+    OptionAcknowledgement(OptionAcknowledgement),
+    Data(Data<'tftp>),
+}
+
+#[derive(Debug)]
+struct Data<'data> {
+    block: u16,
+    data: &'data [u8],
+}
+
+impl<'data> Data<'data> {
+    fn new(ack: &Acknowledgement) -> Self {
+        Self {
+            block: ack.block,
+            data: "I Love Naomi".as_bytes(),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct OptionAcknowledgement {
+    options: Vec<TftpOption>,
+}
+
+impl OptionAcknowledgement {
+    fn new(read_request: &ReadRequest) -> Self {
+        let options: Vec<TftpOption> = read_request
+            .options
+            .iter()
+            .filter(|option| match option {
+                TftpOption::TransferSize(_) => false,
+                _ => true,
+            })
+            .map(TftpOption::confirm)
+            .collect();
+        Self { options }
+    }
+}
+
+#[derive(Debug)]
+struct Acknowledgement {
+    block: u16,
+}
+
+#[derive(Debug)]
+struct ReadRequest<'tftp> {
+    filename: &'tftp CStr,
+    mode: &'tftp CStr,
     options: Vec<TftpOption>,
 }
 
 impl Serialise for Tftp<'_> {
     fn serialise(&self) -> Vec<u8> {
         let mut bytes = Vec::new();
-        bytes.extend_from_slice(&self.op_code.serialise());
 
-        self.options
-            .iter()
-            .for_each(|option| bytes.extend_from_slice(&option.serialise()));
-
-        bytes
+        match self {
+            Tftp::OptionAcknowledgement(res) => {
+                bytes.extend_from_slice(&OpCode::OptionAcknowledgement.serialise());
+                res.options
+                    .iter()
+                    .for_each(|option| bytes.extend_from_slice(&option.serialise()));
+                bytes
+            }
+            Tftp::Data(res) => {
+                bytes.extend_from_slice(&OpCode::Data.serialise());
+                bytes.extend_from_slice(&res.block.to_be_bytes());
+                bytes
+            }
+            _ => panic!("{self:?}"),
+        }
     }
 }
 
@@ -141,54 +201,41 @@ impl<'tftp> Tftp<'tftp> {
 
     fn parse(data: &'tftp [u8]) -> Self {
         dbg!(data);
-        let op_code = data[1].try_into().unwrap();
+        let op_code = data[1].try_into();
         let mut ptr = Self::OP_CODE_LEN;
 
-        let filename = CStr::from_bytes_until_nul(&data[ptr..]).unwrap();
-        ptr += filename.to_bytes().len() + Self::NULL_SIZE;
+        match op_code {
+            Ok(OpCode::ReadRequest) => {
+                let filename = CStr::from_bytes_until_nul(&data[ptr..]).unwrap();
+                ptr += filename.to_bytes().len() + Self::NULL_SIZE;
 
-        let mode = CStr::from_bytes_until_nul(&data[ptr..]).unwrap();
-        ptr += mode.to_bytes().len() + Self::NULL_SIZE;
+                let mode = CStr::from_bytes_until_nul(&data[ptr..]).unwrap();
+                ptr += mode.to_bytes().len() + Self::NULL_SIZE;
 
-        let options = TftpOption::parse(&data[ptr..]);
+                let options = TftpOption::parse(&data[ptr..]);
 
-        Self {
-            op_code,
-            filename: Some(filename),
-            mode: Some(mode),
-            options,
+                Self::ReadRequest(ReadRequest {
+                    filename,
+                    mode,
+                    options,
+                })
+            }
+            Ok(OpCode::Acknowledgement) => Self::Acknowledgement(Acknowledgement {
+                block: u16::from_be_bytes([data[ptr], data[ptr + 1]]),
+            }),
+            _ => panic!("{op_code:?}"),
         }
     }
 
-    fn acknowledge(&self) -> Self {
-
-        let options: Vec<TftpOption> = self.options
-            .iter()
-            .filter(|option| {
-                match option{
-                    TftpOption::TransferSize(_) => false,
-                    _=> true,
-                }
-            }) 
-            .map(TftpOption::confirm)
-            .collect();
-
-        Self {
-            op_code: OpCode::OptionAcknowledgement,
-            filename: None,
-            mode: None,
-            options,
+    fn respond(&self) -> Self {
+        match self {
+            Self::ReadRequest(req) => Tftp::OptionAcknowledgement(OptionAcknowledgement::new(req)),
+            Self::Acknowledgement(req) => Tftp::Data(Data::new(req)),
+            _ => panic!("{self:?}"),
         }
     }
 
     pub fn handle(data: &'tftp [u8]) -> Vec<u8> {
-        let tftp = &Self::parse(data);
-        // dbg!(tftp);
-
-        match tftp.op_code {
-            OpCode::ReadRequest => tftp.acknowledge().serialise(),
-            OpCode::ErrorCode => unimplemented!("ErrorCode {tftp:?}"),
-            _ => todo!("Dont handle op_code yet"),
-        }
+        Self::parse(data).respond().serialise()
     }
 }
