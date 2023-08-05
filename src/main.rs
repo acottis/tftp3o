@@ -28,12 +28,19 @@ fn main() {
     }
 }
 
+/// Once a [UdpSocket] has been accept we check to see if we already have an open [Session] with
+/// that socket, if we don't we create a branch new [Session] to store the state of our transaction
+/// with a client. If we do have a [Session] we carry on where we left off.
+///
+/// We take the data from the socket and the client [Session] and pass to [Tftp::handle()]. If the
+/// data from a client is valid and implemented by us we respond correctly, else we silently drop
+/// the client from out list of [TftpSessions]
 fn handle(socket: &UdpSocket, client: &SocketAddr, sessions: TftpSessions, data: &[u8]) {
-    dbg!(socket);
-
     let mut sessions = sessions.lock().unwrap();
     let mut session = sessions.entry(*client).or_insert(Session::new());
 
-    let response = Tftp::handle(&mut session, data);
-    socket.send_to(&response, client).unwrap();
+    match Tftp::handle(&mut session, data) {
+        Some(response) => _ = socket.send_to(&response, client).unwrap(),
+        None => _ = sessions.remove(client).unwrap(),
+    };
 }

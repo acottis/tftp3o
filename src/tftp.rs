@@ -14,6 +14,7 @@ trait Serialise {
     fn serialise(&self) -> Vec<u8>;
 }
 
+#[derive(Debug)]
 pub struct Session {
     data: Vec<u8>,
     block_size: usize,
@@ -151,20 +152,27 @@ pub struct Data<'data> {
 }
 
 impl<'data> Data<'data> {
-    fn new(ack: &Acknowledgement, session: &'data mut Session) -> Self {
+    fn new(ack: &Acknowledgement, session: &'data mut Session) -> Option<Self> {
         let current_slice = (ack.block as usize)
             .checked_mul(session.block_size)
             .unwrap();
-        let mut current_slice_end = current_slice + session.block_size;
+
+        // We have recieved an ack for the final block so dont send
+        // more data
+        if current_slice > session.file_size {
+            return None;
+        }
+
+        let mut current_slice_end = current_slice.checked_add(session.block_size).unwrap();
 
         if current_slice_end > session.file_size {
             current_slice_end = session.file_size;
         }
 
-        Self {
+        Some(Self {
             block: ack.block + 1,
             data: &session.data[current_slice..current_slice_end],
-        }
+        })
     }
 }
 
@@ -226,7 +234,7 @@ impl Serialise for Tftp<'_> {
                 bytes.extend_from_slice(&res.data);
                 bytes
             }
-            _ => panic!("{self:?}"),
+            _ => unimplemented!("{self:?}"),
         }
     }
 }
@@ -258,24 +266,31 @@ impl<'tftp> Tftp<'tftp> {
             Ok(OpCode::Acknowledgement) => Self::Acknowledgement(Acknowledgement {
                 block: u16::from_be_bytes([data[ptr], data[ptr + 1]]),
             }),
-            _ => panic!("{op_code:?}"),
+            _ => unimplemented!("{op_code:?}"),
         }
     }
 
-    fn respond(&self, session: &'tftp mut Session) -> Self {
+    fn respond(&self, session: &'tftp mut Session) -> Option<Self> {
         match self {
             Self::ReadRequest(req) => {
                 let mut file = File::open(req.filename.to_str().unwrap()).unwrap();
                 session.file_size = file.read_to_end(&mut session.data).unwrap();
 
-                Tftp::OptionAcknowledgement(OptionAcknowledgement::new(req, session))
+                Some(Tftp::OptionAcknowledgement(OptionAcknowledgement::new(
+                    req, session,
+                )))
             }
-            Self::Acknowledgement(req) => Tftp::Data(Data::new(req, session)),
-            _ => panic!("{self:?}"),
+            Self::Acknowledgement(req) => match Data::new(req, session) {
+                Some(data) => Some(Tftp::Data(data)),
+                None => None,
+            },
+            _ => unimplemented!("{self:?}"),
         }
     }
 
-    pub fn handle(session: &mut Session, data: &'tftp [u8]) -> Vec<u8> {
-        Self::parse(data).respond(session).serialise()
+    pub fn handle(session: &mut Session, data: &'tftp [u8]) -> Option<Vec<u8>> {
+        Self::parse(data)
+            .respond(session)
+            .map(|response| response.serialise())
     }
 }
