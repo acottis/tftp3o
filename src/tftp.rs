@@ -16,10 +16,20 @@ trait Serialise {
 
 pub struct Session {
     data: Vec<u8>,
+    block_size: usize,
+    file_size: usize,
+    window_size: usize,
 }
 impl Session {
+    const DEFAULT_BLOCK_SIZE: usize = 512;
+    const DEFAULT_WINDOW_SIZE: usize = 1;
     pub fn new() -> Self {
-        Self { data: Vec::new() }
+        Self {
+            data: Vec::new(),
+            block_size: Self::DEFAULT_BLOCK_SIZE,
+            file_size: 0,
+            window_size: Self::DEFAULT_WINDOW_SIZE,
+        }
     }
 }
 
@@ -141,10 +151,19 @@ pub struct Data<'data> {
 }
 
 impl<'data> Data<'data> {
-    fn new(ack: &Acknowledgement) -> Self {
+    fn new(ack: &Acknowledgement, session: &'data mut Session) -> Self {
+        let current_slice = (ack.block as usize)
+            .checked_mul(session.block_size)
+            .unwrap();
+        let mut current_slice_end = current_slice + session.block_size;
+
+        if current_slice_end > session.file_size {
+            current_slice_end = session.file_size;
+        }
+
         Self {
-            block: ack.block,
-            data: "I Love Naomi".as_bytes(),
+            block: ack.block + 1,
+            data: &session.data[current_slice..current_slice_end],
         }
     }
 }
@@ -155,15 +174,24 @@ pub struct OptionAcknowledgement {
 }
 
 impl OptionAcknowledgement {
-    fn new(read_request: &ReadRequest, tsize: usize) -> Self {
-        let options: Vec<TftpOption> = read_request
+    fn new(req: &ReadRequest, session: &mut Session) -> Self {
+        // Confirm options
+        let options: Vec<TftpOption> = req
             .options
             .iter()
             .map(|option| match option {
-                TftpOption::TransferSize(_) => TftpOption::TransferSize(tsize),
-                option => TftpOption::confirm(option),
+                TftpOption::TransferSize(_) => TftpOption::TransferSize(session.file_size),
+                TftpOption::BlockSize(block_size) => {
+                    session.block_size = *block_size;
+                    TftpOption::BlockSize(*block_size)
+                }
+                TftpOption::WindowSize(window_size) => {
+                    session.window_size = *window_size;
+                    TftpOption::WindowSize(*window_size)
+                }
             })
             .collect();
+
         Self { options }
     }
 }
@@ -208,7 +236,6 @@ impl<'tftp> Tftp<'tftp> {
     const NULL_SIZE: usize = 1;
 
     fn parse(data: &'tftp [u8]) -> Self {
-        dbg!(data);
         let op_code = data[1].try_into();
         let mut ptr = Self::OP_CODE_LEN;
 
@@ -235,14 +262,15 @@ impl<'tftp> Tftp<'tftp> {
         }
     }
 
-    fn respond(&self, session: &mut Session) -> Self {
+    fn respond(&self, session: &'tftp mut Session) -> Self {
         match self {
             Self::ReadRequest(req) => {
                 let mut file = File::open(req.filename.to_str().unwrap()).unwrap();
-                let size = file.read_to_end(&mut session.data).unwrap();
-                Tftp::OptionAcknowledgement(OptionAcknowledgement::new(req, size))
+                session.file_size = file.read_to_end(&mut session.data).unwrap();
+
+                Tftp::OptionAcknowledgement(OptionAcknowledgement::new(req, session))
             }
-            Self::Acknowledgement(req) => Tftp::Data(Data::new(req)),
+            Self::Acknowledgement(req) => Tftp::Data(Data::new(req, session)),
             _ => panic!("{self:?}"),
         }
     }
