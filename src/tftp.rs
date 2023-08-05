@@ -94,14 +94,6 @@ impl TftpOption {
         }
         options
     }
-
-    fn confirm(option: &Self) -> Self {
-        match option {
-            TftpOption::TransferSize(value) => TftpOption::TransferSize(*value),
-            TftpOption::BlockSize(value) => TftpOption::BlockSize(*value),
-            TftpOption::WindowSize(value) => TftpOption::WindowSize(*value),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -164,7 +156,6 @@ impl<'data> Data<'data> {
         }
 
         let mut current_slice_end = current_slice.checked_add(session.block_size).unwrap();
-
         if current_slice_end > session.file_size {
             current_slice_end = session.file_size;
         }
@@ -280,10 +271,7 @@ impl<'tftp> Tftp<'tftp> {
                     req, session,
                 )))
             }
-            Self::Acknowledgement(req) => match Data::new(req, session) {
-                Some(data) => Some(Tftp::Data(data)),
-                None => None,
-            },
+            Self::Acknowledgement(req) => Data::new(req, session).map(Tftp::Data),
             _ => unimplemented!("{self:?}"),
         }
     }
